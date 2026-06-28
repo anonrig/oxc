@@ -33,6 +33,32 @@ pub fn parse_jest_fn_call<'a>(
 
     let resolved = resolve_to_jest_fn(call_expr, original)?;
 
+    // Fast path: a call can only be a Jest/Vitest call if its root identifier is
+    // a known Jest name. `JestFnKind::from` classifies the call-chain kinds
+    // (`describe`, `it`, `test`, `expect`, `jest`, `vi`, `vitest`, a hook, ...),
+    // and `JEST_METHOD_NAMES` is the broader global-name set used elsewhere to
+    // discover global Jest calls (it additionally contains `pending`, which maps
+    // to no `JestFnKind`). When the root name is in neither set, this call cannot
+    // be a Jest call, so bail out before the (heap-allocating) `get_node_chain`
+    // walk below. Most call expressions in real code are not Jest calls, so this
+    // skips a `Vec` allocation per call for every rule that probes calls via this
+    // helper.
+    //
+    // This is behavior-preserving:
+    // - On a Jest/Vitest file an unrecognized root already fails the
+    //   `is_valid_jest_call` / `is_valid_vitest_call` checks below (their valid
+    //   roots are all covered by these two sets), so the old code returned `None`
+    //   too.
+    // - On a non-test file the old code returned `GeneralJest { kind: Unknown }`
+    //   for such a call. The only consumer that keeps `Unknown` results is
+    //   `prefer-importing-jest-globals`, and the jest-node iterator only ever
+    //   feeds it global roots that are in `JEST_METHOD_NAMES`; excluding those
+    //   names from the bail keeps its diagnostics identical (e.g. `pending()`).
+    let name = resolved.original.unwrap_or(resolved.local);
+    if JestFnKind::from(name) == JestFnKind::Unknown && !super::JEST_METHOD_NAMES.contains(&name) {
+        return None;
+    }
+
     let params = NodeChainParams {
         expr: callee,
         parent: None, // TODO: not really know how to convert type of call_expr to Expression, set to `None` temporarily.
